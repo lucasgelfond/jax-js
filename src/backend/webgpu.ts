@@ -24,6 +24,8 @@ interface ShaderDispatch extends ShaderInfo {
 
 const MAX_REUSABLE_BUFFER_BYTES = 64 * 1024 * 1024;
 const MAX_REUSABLE_BUFFERS_PER_SIZE = 64;
+// Every distinct size gets its own pool, so cap their total as well.
+const MAX_POOLED_BYTES = 512 * 1024 * 1024;
 
 /** Implementation of `Backend` that uses WebGPU in browsers. */
 export class WebGPUBackend implements Backend {
@@ -46,6 +48,7 @@ export class WebGPUBackend implements Backend {
   #cachedShaderMap = new Map<bigint, ShaderInfo>();
   #reusableZsb: GPUBuffer;
   #bufferPool = new Map<number, GPUBuffer[]>();
+  #pooledBytes = 0;
 
   constructor(readonly device: GPUDevice) {
     if (DEBUG >= 3 && device.adapterInfo) {
@@ -226,24 +229,24 @@ export class WebGPUBackend implements Backend {
     const bucket = this.#bufferPool.get(size);
     const buffer = bucket?.pop();
     if (bucket && bucket.length === 0) this.#bufferPool.delete(size);
-    return buffer ?? this.#createBuffer(size);
+    if (!buffer) return this.#createBuffer(size);
+    this.#pooledBytes -= size;
+    return buffer;
   }
 
   #releaseBuffer(buffer: GPUBuffer, size: number): void {
-    if (size > MAX_REUSABLE_BUFFER_BYTES) {
-      buffer.destroy();
-      return;
-    }
     const bucket = this.#bufferPool.get(size);
-    if (!bucket) {
-      this.#bufferPool.set(size, [buffer]);
-      return;
-    }
-    if (bucket.length >= MAX_REUSABLE_BUFFERS_PER_SIZE) {
+    if (
+      size > MAX_REUSABLE_BUFFER_BYTES ||
+      (bucket?.length ?? 0) >= MAX_REUSABLE_BUFFERS_PER_SIZE ||
+      this.#pooledBytes + size > MAX_POOLED_BYTES
+    ) {
       buffer.destroy();
       return;
     }
-    bucket.push(buffer);
+    if (bucket) bucket.push(buffer);
+    else this.#bufferPool.set(size, [buffer]);
+    this.#pooledBytes += size;
   }
 
   /**
