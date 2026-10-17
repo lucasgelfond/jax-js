@@ -914,13 +914,16 @@ function splitGraphDataflow(backend: Backend, jaxpr: Jaxpr): Set<Var> {
     }
     return false;
   };
-  const markNonViewProducer = (v: Var): void => {
+  const markNonViewProducer = (v: Var, throughCasts = false): void => {
     let current = v;
     while (true) {
       const defn = varToDefn.get(current);
       if (defn === undefined) return;
       const eqn = jaxpr.eqns[defn];
-      if (!viewPrimitives.includes(eqn.primitive)) break;
+      const passable =
+        viewPrimitives.includes(eqn.primitive) ||
+        (throughCasts && eqn.primitive === Primitive.Cast);
+      if (!passable) break;
       const input = eqn.inputs.find((input) => input instanceof Var);
       if (!input) return;
       current = input;
@@ -946,7 +949,10 @@ function splitGraphDataflow(backend: Backend, jaxpr: Jaxpr): Set<Var> {
         input instanceof Var &&
         reductionInputHasReuse(inputShapes[i], promoted)
       ) {
-        markNonViewProducer(input);
+        // A cast is cheap to redo on every reuse, so look through it: e.g. f16
+        // weights cast to f32 for a matmul are read as f16 inside the kernel,
+        // instead of materializing an f32 copy of the weights on every call.
+        markNonViewProducer(input, true);
       }
     }
   }
